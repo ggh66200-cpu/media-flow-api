@@ -1,98 +1,83 @@
 import os
-import subprocess
+import telebot
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
-from supabase import create_client, Client
 
-app = FastAPI(title="MediaFlow API", version="1.0.0")
+# قراءة التوكن من إعدادات البيئة في Render
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+bot = telebot.TeleBot(BOT_TOKEN) if BOT_TOKEN else None
 
-# إعداد الربط مع Supabase (سنضع المتغيرات البيئية لاحقاً في Render)
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+app = FastAPI(title="Media Flow API & Telegram Bot")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL else None
-
-class MediaTaskRequest(BaseModel):
+# نموذج البيانات القادم للـ API
+class ProcessRequest(BaseModel):
     user_id: str
     video_url: str
-    action: str = "compress" # compress, convert_mp3, etc.
+    action: str = "compress"
 
-def process_media_background(job_id: str, video_url: str, action: str):
-    """
-    دالة المعالجة التي تعمل في الخلفية دون تعطيل استجابة الـ API
-    """
-    try:
-        # 1. تحديث حالة الطلب إلى جارٍ المعالجة
-        if supabase:
-            supabase.table("media_jobs").update({"status": "processing"}).eq("id", job_id).execute()
-
-        # 2. اسم الملف المؤقت
-        input_file = f"temp_input_{job_id[:8]}.mp4"
-        output_file = f"temp_output_{job_id[:8]}.mp4"
-
-        # 3. تحميل الفيديو (أو استقباله)
-        # ملاحظة: سنستخدم أمر wget أو curl خفيف لتحميل الملف
-        download_cmd = f"curl -s -L '{video_url}' -o {input_file}"
-        subprocess.run(download_cmd, shell=True, check=True)
-
-        # 4. تطبيق أمر FFmpeg حسب الطلب
-        if action == "compress":
-            # ضغط الفيديو وتقليل الحجم بنفس الجودة
-            ffmpeg_cmd = f"ffmpeg -i {input_file} -vcodec libx264 -crf 28 {output_file} -y"
-        else:
-            ffmpeg_cmd = f"ffmpeg -i {input_file} {output_file} -y"
-
-        subprocess.run(ffmpeg_cmd, shell=True, check=True)
-
-        # 5. هنا يتم رفع الملف الناتج إلى Supabase Storage أو إرجاع رابطه
-        # (للتجربة سنضع رابطاً شاملاً لمُخرجات المعالجة)
-        processed_url = f"https://your-storage-bucket.com/{output_file}"
-
-        # 6. تحديث حالة الطلب إلى اكتمل
-        if supabase:
-            supabase.table("media_jobs").update({
-                "status": "completed",
-                "processed_url": processed_url
-            }).eq("id", job_id).execute()
-
-        # تنظيف الملفات المؤقتة من السيرفر
-        if os.path.exists(input_file): os.remove(input_file)
-        if os.path.exists(output_file): os.remove(output_file)
-
-    except Exception as e:
-        if supabase:
-            supabase.table("media_jobs").update({"status": f"failed: {str(e)}"}).eq("id", job_id).execute()
-
+# دالة المعالجة الخلفية (Background Task)
+def background_media_processing(job_id: str, video_url: str, user_id: str):
+    print(f"[*] Starting background task {job_id} for user {user_id}...")
+    # هنا يتم تطبيق كود معالجة الفيديو لاحقاً (مثل استخدام FFmpeg)
+    # حالياً نقوم بمحاكاة عملية المعالجة
+    import time
+    time.sleep(3)
+    print(f"[+] Task {job_id} completed successfully!")
+    
+    # إذا كان الطلب قادماً من بوت تيليجرام، يمكننا إرسال رسالة للمستخدم هنا
+    if bot and user_id.isdigit():
+        try:
+            bot.send_message(chat_id=int(user_id), text="✅ تم معالجة الفيديو الخاص بك بنجاح!")
+        except Exception as e:
+            print(f"[-] Failed to send Telegram notification: {e}")
 
 @app.get("/")
 def home():
-    return {"status": "online", "message": "Welcome to MediaFlow API Engine"}
-
+    return {"status": "online", "message": "Media Flow API is running successfully!"}
 
 @app.post("/api/v1/process")
-async def create_processing_task(payload: MediaTaskRequest, background_tasks: BackgroundTasks):
-    """
-    نقطة استقبال الطلبات من المطورين
-    """
-    if not supabase:
-        raise HTTPException(status_code=500, detail="Supabase client not initialized")
-
-    # إنشاء سجل جديد في جدول media_jobs
-    job_data = {
-        "user_id": payload.user_id,
-        "original_url": payload.video_url,
-        "status": "pending"
-    }
+def process_media(request: ProcessRequest, background_tasks: BackgroundTasks):
+    import uuid
+    job_id = str(uuid.uuid4())
     
-    response = supabase.table("media_jobs").insert(job_data).execute()
-    job_id = response.data[0]["id"]
-
-    # تشغيل عملية المعالجة في الخلفية كي يرجع الـ API رد فوري للمطور
-    background_tasks.add_task(process_media_background, job_id, payload.video_url, payload.action)
-
+    # إشعار البداية في الخلفية
+    background_tasks.add_task(background_media_processing, job_id, request.video_url, request.user_id)
+    
     return {
         "success": True,
         "job_id": job_id,
         "status": "pending",
         "message": "Task received and is processing in background."
     }
+
+# إعداد تفاعل بوت تيليجرام لاستقبال الفيديوهات
+if bot:
+    @bot.message_handler(commands=['start'])
+    def send_welcome(message):
+        bot.reply_to(message, "أهلاً بك في بوت معالجة الميديا! أرسل لي أي فيديو وسأقوم بمعالجته لك.")
+
+    @bot.message_handler(content_types=['video', 'document'])
+    def handle_video(message):
+        bot.reply_to(message, "⏳ جاري استلام الفيديو وبدء المعالجة على السيرفر...")
+        try:
+            # استخراج رابط الملف من تيليجرام
+            file_info = bot.get_file(message.video.file_id if message.video else message.document.file_id)
+            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+            
+            user_id = str(message.chat.id)
+            
+            # استدعاء دالة المعالجة مباشرة
+            import uuid
+            job_id = str(uuid.uuid4())
+            background_media_processing(job_id, file_url, user_id)
+            
+        except Exception as e:
+            bot.reply_to(message, f"❌ حدث خطأ أثناء استقبال الملف: {str(e)}")
+
+    # تشغيل البوت في الخلفية ليبقى مستምعاً للرسائل
+    import threading
+    def run_telegram_bot():
+        print("[*] Telegram Bot polling started...")
+        bot.infinity_polling()
+        
+    threading.Thread(target=run_telegram_bot, daemon=True).start()
